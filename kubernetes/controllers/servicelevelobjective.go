@@ -18,11 +18,14 @@ package controllers
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/sha1"
 	"fmt"
 	"time"
 
 	kitlog "github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	grafanav1beta1 "github.com/grafana/grafana-operator/v5/api/v1beta1"
 	mimircli "github.com/grafana/mimir/pkg/mimirtool/client"
 	"github.com/grafana/mimir/pkg/mimirtool/rules/rwrulefmt"
 	"github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring"
@@ -31,9 +34,11 @@ import (
 	"github.com/prometheus/prometheus/model/rulefmt"
 	yamlv3 "gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/json"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -112,7 +117,7 @@ func (r *ServiceLevelObjectiveReconciler) reconcilePrometheusRule(ctx context.Co
 	return ctrl.Result{}, nil
 }
 
-// TODO Implement
+// TODO Implement deletion
 func (r *ServiceLevelObjectiveReconciler) reconcileMimirRuleGroup(ctx context.Context, logger kitlog.Logger, req ctrl.Request, kubeObjective pyrrav1alpha1.ServiceLevelObjective) (ctrl.Result, error) {
 	newRuleGroup, err := makeMimirRuleGroup(kubeObjective, r.GenericRules, r.MimirWriteAlertingRules)
 	if err != nil {
@@ -290,6 +295,200 @@ func makeMimirRuleGroup(kubeObjective pyrrav1alpha1.ServiceLevelObjective, gener
 			Rules:    combinedRules,
 		},
 	}, nil
+}
+
+func makeGrafanaAlertRuleGroup(kubeObjective pyrrav1alpha1.ServiceLevelObjective, genericRules bool, writeAlertingRules bool) (*rwrulefmt.RuleGroup, error) {
+	objective, err := kubeObjective.Internal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get objective: %w", err)
+	}
+
+	increases, err := objective.IncreaseRules()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get increase rules: %w", err)
+	}
+	increasesAlertRuleGroup := prometheusRuleGroupToGrafanaAlertRuleGroup(increases)
+
+	alertGroup := grafanav1beta1.GrafanaAlertRuleGroup{}
+	return nil, nil
+}
+
+func prometheusRuleGroupToGrafanaAlertRuleGroup(prometheusRuleGroup monitoringv1.RuleGroup) grafanav1beta1.GrafanaAlertRuleGroup {
+	rules := []grafanav1beta1.AlertRule{}
+
+	for _, r := range prometheusRuleGroup.Rules {
+		if r.Alert == "" {
+			continue
+		}
+
+		rules = append(rules, prometheusRuleToGrafanaAlertRule(prometheusRuleGroup.Name, r))
+	}
+
+	// TODO add all fields
+	return grafanav1beta1.GrafanaAlertRuleGroup{
+		Spec: grafanav1beta1.GrafanaAlertRuleGroupSpec{
+			Rules: rules,
+		},
+	}
+}
+
+func prometheusRuleToGrafanaAlertRule(sloName string, promRule monitoringv1.Rule) grafanav1beta1.AlertRule {
+	forDuration := time.Minute * 5
+	if promRule.For != nil {
+		duration, err := time.ParseDuration(string(*promRule.For))
+		if err != nil {
+			forDuration = duration
+		}
+	}
+
+	type Datasource struct {
+		Type string `json:"type"`
+		UID  string `json:"uid"`
+	}
+
+	type ModelA struct {
+		Datasource    Datasource `json:"datasource"`
+		EditorMode    string     `json:"editorMode"`
+		Expr          string     `json:"expr"`
+		Instant       bool       `json:"instant"`
+		IntervalMs    int        `json:"intervalMs"`
+		LegendFormat  string     `json:"legendFormat"`
+		MaxDataPoints int        `json:"maxDataPoints"`
+		Range         bool       `json:"range"`
+		RefID         string     `json:"refId"`
+	}
+
+	type Evaluator struct {
+		Params []int  `json:"params"`
+		Type   string `json:"type"`
+	}
+
+	type Operator struct {
+		Type string `json:"type"`
+	}
+
+	type Query struct {
+		Params []string `json:"params"`
+	}
+
+	type Reducer struct {
+		Params []interface{} `json:"params"`
+		Type   string        `json:"type"`
+	}
+
+	type Condition struct {
+		Evaluator Evaluator `json:"evaluator"`
+		Operator  Operator  `json:"operator"`
+		Query     Query     `json:"query"`
+		Reducer   Reducer   `json:"reducer"`
+		Type      string    `json:"type"`
+	}
+
+	type ModelB struct {
+		DatasourceUID string      `json:"datasourceUid"`
+		Conditions    []Condition `json:"conditions"`
+		Datasource    Datasource  `json:"datasource"`
+		Expression    string      `json:"expression"`
+		IntervalMs    int         `json:"intervalMs"`
+		MaxDataPoints int         `json:"maxDataPoints"`
+		RefID         string      `json:"refId"`
+		Type          string      `json:"type"`
+	}
+	//datasource:
+	//type: {{ .datasourceType }}
+	//uid: {{ .datasourceUID }}
+	//editorMode: code
+	//expr: {{ .expr }}
+	//instant: true
+	//intervalMs: 1000
+	//legendFormat: __auto
+	//maxDataPoints: 43200
+	//range: false
+	//refId: A
+
+	modelA := ModelA{
+		Datasource: Datasource{
+			Type: "prometheus",
+			UID:  "prometheus",
+		},
+		EditorMode:    "code",
+		Expr:          promRule.Expr.String(),
+		Instant:       true,
+		IntervalMs:    1000,
+		LegendFormat:  "__auto",
+		MaxDataPoints: 43200,
+		Range:         false,
+		RefID:         "A",
+	}
+
+	//conditions:
+	//- evaluator:
+	//params:
+	//- {{ .conditionThreshold }}
+	//type: {{ .conditionType }}
+	//operator:
+	//type: and
+	//query:
+	//params:
+	//- C
+	//reducer:
+	//params: []
+	//type: last
+	//type: query
+	//datasource:
+	//type: __expr__
+	//uid: __expr__
+	//expression: A
+	//intervalMs: 1000
+	//maxDataPoints: 43200
+	//refId: B
+	//type: threshold
+	modelB := ModelB{
+		DatasourceUID: "__expr__",
+		Conditions: []Condition{
+			Condition{}, // TODO try parse condition from prometheusrule or pass dirctly?
+		},
+		Datasource: Datasource{
+			Type: "__expr__",
+			UID:  "__expr__",
+		},
+		Expression:    "A",
+		IntervalMs:    1000,
+		MaxDataPoints: 43200,
+		RefID:         "B",
+		Type:          "threshold",
+	}
+
+	//TODO: check error?
+	modelABytes, _ := json.Marshal(modelA)
+	modelBBytes, _ := json.Marshal(modelB)
+
+	return grafanav1beta1.AlertRule{
+		UID:         grafanaAlertRuleUID(sloName, promRule.Alert),
+		For:         &metav1.Duration{forDuration},
+		Title:       promRule.Alert,
+		Labels:      promRule.Labels,
+		Annotations: promRule.Annotations,
+		Condition:   "B",
+		// TODO add actual model
+		Data: []*grafanav1beta1.AlertQuery{
+			&grafanav1beta1.AlertQuery{
+				RefID: "A",
+				// TODO: read from annotation or CRD?
+				DatasourceUID: "prometheus",
+				Model:         &v1.JSON{modelABytes},
+			},
+			&grafanav1beta1.AlertQuery{
+				RefID:         "B",
+				DatasourceUID: "__expr__",
+				Model:         &v1.JSON{modelBBytes},
+			},
+		},
+	}
+}
+
+func grafanaAlertRuleUID(sloName, ruleName string) string {
+	return fmt.Sprintf("%s", sha1.Sum([]byte(fmt.Sprintf("%s-%s", sloName, ruleName))))
 }
 
 func prometheusRuleToMimirRuleNode(promRule monitoringv1.Rule) rulefmt.RuleNode {

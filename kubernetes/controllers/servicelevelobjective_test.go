@@ -6,13 +6,12 @@ import (
 
 	"github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	pyrrav1alpha1 "github.com/pyrra-dev/pyrra/kubernetes/api/v1alpha1"
+	"github.com/pyrra-dev/pyrra/slo"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-
-	pyrrav1alpha1 "github.com/pyrra-dev/pyrra/kubernetes/api/v1alpha1"
-	"github.com/pyrra-dev/pyrra/slo"
 )
 
 var (
@@ -382,4 +381,32 @@ func Test_makeConfigMap(t *testing.T) {
 func monitoringDuration(d string) *monitoringv1.Duration {
 	md := monitoringv1.Duration(d)
 	return &md
+}
+
+func Test_grafanaAlertRuleUID(t *testing.T) {
+	type args struct {
+		sloName  string
+		ruleName string
+	}
+	tests := []struct {
+		name string
+		args args
+		want string
+	}{
+		{
+			name: "hello world",
+			args: args{
+				ruleName: "helloWorldRuleName",
+				sloName:  "helloWorldSLO",
+			},
+			want: "310aeb65083434be5f731c3bfb8518ad047e7589",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := grafanaAlertRuleUID(tt.args.sloName, tt.args.ruleName); got != tt.want {
+				t.Errorf("grafanaAlertRuleUID() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
